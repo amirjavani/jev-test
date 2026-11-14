@@ -1,13 +1,15 @@
 import express from 'express';
 import { validateRequest } from '../shared/validation.js';
+import { registerQuestionLists } from './question-lists.js';
 
-export function createApp({ env = process.env, fetchImpl = fetch } = {}) {
+export function createApp({ env = process.env, fetchImpl = fetch, storageDir, commonDir } = {}) {
   const app = express();
   const providers = {
     gapgpt: { name: 'GapGPT', url: 'https://api.gapgpt.app/v1/systemone', key: env.GAPGPT_API_KEY, model: 'typesafe/jev-1.14' },
     typesafe: { name: 'TypeSafe', url: 'https://api.typesafe.ai/v1/systemone', key: env.TYPESAFE_API_KEY, model: 'jev-1.14.0' },
   };
   app.use(express.json({ limit: '32mb' }));
+  registerQuestionLists(app, storageDir, commonDir);
   app.get('/api/config', (_req, res) => res.json({ providers: Object.entries(providers).map(([id, p]) => ({ id, name: p.name, endpoint: p.url, model: p.model, configured: Boolean(p.key?.trim()) })) }));
   app.post('/api/evaluate', async (req, res) => {
     const { provider, request, longContext = false } = req.body ?? {};

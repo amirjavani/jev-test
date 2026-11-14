@@ -2,10 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../server/app.js';
 import { validateRequest } from '../shared/validation.js';
+import { mkdtemp, readdir, readFile, writeFile, mkdir, unlink, rmdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { normalizeList, editorsFromQuestions, questionsFromEditors } from '../shared/question-lists.js';
+import { evaluateSequentially, normalizeRun } from '../shared/runs.js';
 
 const request = { model: 'typesafe/jev-1.14', state: { text: 'Please refund the duplicate payment.' }, questions: { refund: { type: 'noul', instructions: { question: 'Is a refund requested?' } }, team: { type: 'choice', instructions: ['Which team?'], criteria: { billing: 'Payments', technical: 'Bugs' } }, urgency: { type: 'score', criteria: ['Routine', 'Urgent', 'Emergency'] } } };
 async function serve(t, options) {
-  const server = createApp(options).listen(0, '127.0.0.1');
+  const server = createApp({ commonDir: null, ...options }).listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   return `http://127.0.0.1:${server.address().port}`;
@@ -70,4 +75,155 @@ test('network errors and timeouts have actionable responses', async t => {
     assert.equal(response.status, status);
     assert.ok(!(await response.text()).includes('secret'));
   }
+});
+
+test('question JSON round-trips structured instructions and criteria without state or credentials', () => {
+  const questions = { ...request.questions, box: { type: 'box', instructions: 'Locate photo' }, nullable: { type: 'noul', instructions: null, criteria: { true: ['yes'], false: { description: 'no' } } } };
+  const list = normalizeList({ name: 'Mixed questions', questions, state: 'private state', apiKey: 'private-key' });
+  assert.deepEqual(questionsFromEditors(editorsFromQuestions(list.questions)), questions);
+  assert.deepEqual(normalizeList(JSON.parse(JSON.stringify(list))), list);
+  assert.deepEqual(normalizeList(questions).questions, questions);
+  const reservedNames = { questions: { type: 'noul' }, version: { type: 'noul' }, name: { type: 'noul' } };
+  assert.deepEqual(normalizeList(reservedNames).questions, reservedNames);
+  assert.ok(!JSON.stringify(list).includes('private'));
+  assert.throws(() => normalizeList({ version: 99, questions }));
+  assert.throws(() => normalizeList({ questions: {} }));
+  assert.throws(() => questionsFromEditors([{ id: 'same', type: 'noul', instructions: '', format: 'text', criteria: '' }, { id: 'same', type: 'noul', instructions: '', format: 'text', criteria: '' }]));
+});
+
+test('saved lists persist across app instances, update, and reject invalid writes', async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'jev-question-lists-'));
+  t.after(async () => { for (const file of await readdir(directory)) await unlink(path.join(directory, file)); await rmdir(directory); });
+  const url = await serve(t, { env: {}, storageDir: directory });
+  const save = body => fetch(`${url}/api/question-lists`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.deepEqual((await (await fetch(`${url}/api/question-lists`)).json()).lists, []);
+  const response = await save({ name: 'Refund / team', questions: request.questions, apiKey: 'never-save-this', state: 'never-save-this' });
+  assert.equal(response.status, 200);
+  const saved = await response.json();
+  const disk = await readFile(path.join(directory, `${saved.id}.json`), 'utf8');
+  assert.ok(!disk.includes('never-save-this'));
+  assert.deepEqual(JSON.parse(disk).questions, request.questions);
+  const otherUrl = await serve(t, { env: {}, storageDir: directory });
+  assert.deepEqual((await (await fetch(`${otherUrl}/api/question-lists`)).json()).lists[0].questions, request.questions);
+  assert.equal((await save({ ...saved, name: 'Updated list' })).status, 200);
+  assert.equal(JSON.parse(await readFile(path.join(directory, `${saved.id}.json`), 'utf8')).name, 'Updated list');
+  assert.equal((await save({ ...saved, id: '../../escape' })).status, 400);
+  assert.equal((await save({ ...saved, questions: {} })).status, 400);
+  assert.equal((await readdir(directory)).length, 1);
+});
+
+test('batch evaluates texts strictly one at a time and retains per-text failures', async () => {
+  const events = [];
+  let active = 0;
+  const entries = await evaluateSequentially({
+    states: ['first', 'second', 'third'], signal: new AbortController().signal,
+    onUpdate: entries => events.push(entries.map(entry => entry.status)),
+    evaluate: async state => {
+      active++; assert.equal(active, 1, 'requests must never overlap');
+      await Promise.resolve(); active--;
+      if (state === 'second') throw new Error('Network failed');
+      return { ok: true, status: 200, data: { answers: { check: { type: 'noul', noul: 0.9 } }, input: state } };
+    },
+  });
+  assert.deepEqual(entries.map(entry => entry.status), ['success', 'error', 'success']);
+  assert.equal(entries[1].error, 'Network failed');
+  assert.equal(entries[2].response.data.input, 'third');
+  assert.ok(events.every(statuses => statuses.filter(status => status === 'running').length <= 1));
+  assert.ok(events.some(statuses => statuses.join() === 'success,running,pending'));
+});
+
+test('batch cancellation keeps completed outputs and never starts queued texts', async () => {
+  const controller = new AbortController();
+  const called = [];
+  const entries = await evaluateSequentially({ states: ['first', 'second', 'third'], signal: controller.signal, onUpdate: () => {}, evaluate: async state => {
+    called.push(state);
+    if (state === 'second') { controller.abort(); throw new Error('Aborted'); }
+    return { ok: true, status: 200, data: {} };
+  } });
+  assert.deepEqual(called, ['first', 'second']);
+  assert.deepEqual(entries.map(entry => entry.status), ['success', 'cancelled', 'skipped']);
+});
+
+test('output history persists per question list with exact input and question snapshots', async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'jev-output-history-'));
+  t.after(async () => {
+    assert.equal(path.dirname(directory), path.resolve(tmpdir()));
+    assert.ok(path.basename(directory).startsWith('jev-output-history-'));
+    await rm(directory, { recursive: true, force: true });
+  });
+  const url = await serve(t, { env: {}, storageDir: directory });
+  const jsonPost = (route, body) => fetch(`${url}${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const list = await (await jsonPost('/api/question-lists', { name: 'Billing', questions: request.questions })).json();
+  const route = `/api/question-lists/${list.id}/runs`;
+  const run = { provider: 'gapgpt', mode: 'batch', request, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), entries: [
+    { state: { text: 'First text' }, status: 'success', response: { ok: true, status: 200, durationMs: 12, data: { answers: { refund: { type: 'noul', noul: .9 } } } } },
+    { state: { text: 'Second text' }, status: 'error', response: { ok: false, status: 429, durationMs: 5, data: { error: 'Rate limited' } } },
+    { state: { text: 'Third text' }, status: 'skipped' },
+  ], apiKey: 'do-not-store' };
+  const response = await jsonPost(route, run);
+  assert.equal(response.status, 200);
+  const saved = await response.json();
+  assert.equal(saved.questionList.id, list.id);
+  assert.deepEqual(saved.entries.map(entry => entry.state), run.entries.map(entry => entry.state));
+  assert.deepEqual(saved.questionList.questions, request.questions);
+  assert.ok(!JSON.stringify(saved).includes('do-not-store'));
+  const otherUrl = await serve(t, { env: {}, storageDir: directory });
+  const history = await (await fetch(`${otherUrl}${route}`)).json();
+  assert.equal(history.runs[0].id, saved.id);
+  assert.equal(history.runs[0].count, 3);
+  assert.equal(history.runs[0].succeeded, 1);
+  assert.deepEqual(await (await fetch(`${otherUrl}${route}/${saved.id}`)).json(), saved);
+  assert.equal((await jsonPost(route, { ...run, request: { ...request, questions: { different: { type: 'noul' } } } })).status, 409);
+  assert.equal((await jsonPost(route, { ...run, entries: [{ state: 'x', status: 'running' }] })).status, 400);
+  assert.equal((await jsonPost('/api/question-lists/../../escape/runs', run)).status, 404);
+  const otherList = await (await jsonPost('/api/question-lists', { name: 'Other list', questions: request.questions })).json();
+  assert.deepEqual((await (await fetch(`${url}/api/question-lists/${otherList.id}/runs`)).json()).runs, []);
+  await jsonPost('/api/question-lists', { ...list, questions: { changed: { type: 'noul' } } });
+  assert.deepEqual((await (await fetch(`${url}${route}/${saved.id}`)).json()).questionList.questions, request.questions);
+  assert.throws(() => normalizeRun({ ...run, entries: [] }));
+});
+
+test('common spam example is public, editable, and keeps local copies and outputs separate', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'jev-common-lists-'));
+  t.after(async () => {
+    assert.equal(path.dirname(root), path.resolve(tmpdir()));
+    assert.ok(path.basename(root).startsWith('jev-common-lists-'));
+    await rm(root, { recursive: true, force: true });
+  });
+  const commonDir = path.join(root, 'common');
+  const storageDir = path.join(root, 'local');
+  const id = '89a42172-28b6-48dc-b63a-545e45fce988';
+  const fixture = await readFile(new URL(`../common/question-lists/${id}.json`, import.meta.url), 'utf8');
+  const definition = JSON.parse(fixture);
+  normalizeList(definition);
+  assert.ok(definition.exampleTexts.length > 0);
+  assert.deepEqual(Object.keys(definition.questions), ['advertising_spam', 'contains_phone_number', 'contains_link', 'contains_contact_details', 'allowed']);
+  await mkdir(commonDir);
+  await writeFile(path.join(commonDir, `${id}.json`), fixture);
+  const url = await serve(t, { env: {}, commonDir, storageDir });
+  const otherUrl = await serve(t, { env: {}, commonDir, storageDir: path.join(root, 'other-local') });
+  const getLists = async base => (await (await fetch(`${base}/api/question-lists`)).json()).lists;
+  const save = async (base, body) => fetch(`${base}/api/question-lists`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const common = (await getLists(url))[0];
+  assert.equal(common.scope, 'common');
+  assert.equal((await getLists(otherUrl))[0].id, id);
+  const edited = { ...common, name: 'Edited shared spam policy', questions: { ...common.questions, extra_check: { type: 'noul', instructions: 'Is this a referral offer?' } } };
+  const response = await save(url, edited);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).scope, 'common');
+  const reopened = (await getLists(otherUrl))[0];
+  assert.equal(reopened.name, edited.name);
+  assert.deepEqual(reopened.questions, edited.questions);
+  assert.deepEqual(reopened.exampleTexts, definition.exampleTexts);
+  assert.equal((await readdir(storageDir)).filter(file => file.endsWith('.json')).length, 0);
+  const copy = await (await save(url, { name: 'My spam policy', questions: edited.questions })).json();
+  assert.equal(copy.scope, 'local');
+  assert.notEqual(copy.id, id);
+  assert.equal((await getLists(otherUrl)).length, 1);
+  assert.equal((await getLists(url)).length, 2);
+  const run = { provider: 'gapgpt', mode: 'single', request: { ...request, questions: edited.questions }, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), entries: [{ state: 'Sample text', status: 'success', response: { ok: true, status: 200, data: { answers: {} } } }] };
+  const output = await fetch(`${url}/api/question-lists/${id}/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(run) });
+  assert.equal(output.status, 200);
+  assert.ok((await readdir(storageDir)).includes(`${id}.runs`));
+  assert.deepEqual(await readdir(commonDir), [`${id}.json`]);
 });

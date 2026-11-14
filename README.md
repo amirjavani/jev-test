@@ -36,7 +36,39 @@ Open http://localhost:3000. Restart the server after changing `.env`. The abbrev
    - **Box**: experimental image localization. Add base64 PNG/JPEG assets under Advanced settings and reference an asset key in state or instructions. The server enables the experimental images header for assets or Box questions. GapGPT support for experimental features is unverified.
 5. Inspect **Request**, then **Run evaluation**. **Results** displays typed answers; **Raw JSON** retains the full upstream response, including errors. Cancel stops waiting in the browser; an already-submitted upstream request may still complete and be billed.
 
-The refund, team, and urgency example is loaded initially. **Reset example** restores it. Inputs are kept in memory and reset on page reload.
+The refund, team, and urgency example is loaded initially. **Reset example** restores it. Unsaved inputs reset on page reload.
+
+## Save, import, and export questions
+
+### Common lists: public and editable
+
+**Question lists → Common · public & editable → Advertisement & spam detection** is a built-in example shipped in `common/question-lists/`. Everyone running the project receives this common list. Select it to edit its questions and use **Save shared changes** to update the shared JSON file, or **Save local copy** for a variant excluded from Git. Common files are intended to be version-controlled and shared with the project. Changes affect users of the same running project; distributing them to other checkouts uses the normal Git workflow. No hosting or internet publication is configured.
+
+The policy prohibits advertising/unsolicited promotion, phone numbers, links/domain addresses, and email/social contact identifiers, even in otherwise non-promotional text. It includes five Noul questions: `advertising_spam`, `contains_phone_number`, `contains_link`, `contains_contact_details`, and `allowed`. Instructions cover obfuscation, English/Persian text, Persian/Arabic digits, and distinguishing contact numbers from ordinary prices, dates, and order IDs. These are model judgments for testing, not deterministic URL/phone filters; evaluate their probabilities on your own data before choosing rejection thresholds.
+
+Click **Load 11 example texts** to fill the batch inputs with allowed conversation, ads without links, phone numbers, links, disguised domains, contact details, and Persian examples. The same inputs are in `examples/advertisement-spam-texts.json`. Clicking this button replaces the current state text list. Saved outputs for common lists still go to ignored `.local/` storage.
+
+### Local lists
+
+Under Questions, enter a **List name** and click **Save locally**. Lists are stored as JSON files in `.local/question-lists/` inside the project, which is ignored by Git. Choose a saved list to replace the question editor with its questions. **Save changes** updates the selected list; choose **New list** to save a separate copy of the current questions. Saved lists remain available after restarting the app.
+
+**Export JSON** downloads the current questions, and **Import JSON** loads a file into the editor. Imports are validated before replacing the current list; click **Save locally** after importing to keep the list in this project. Both operations preserve structured instructions and typed criteria. State, provider settings, and API keys are excluded.
+
+The exported format is `{ "version": 1, "name": "My questions", "questions": { ... } }`. Import also accepts a bare API question map or a request object containing `questions`. Files must be smaller than 1 MB. Saving and exporting questions works even if the state input is unfinished or invalid.
+
+## Batch text tests and saved outputs
+
+Choose **Text list** in the State panel and add one or more texts. Each text is sent as a separate `{ "text": "…" }` state with the same questions. Requests run sequentially, and each result appears in its own numbered output card. Errors are retained per text and the queue continues. **Cancel remaining texts** stops waiting for the active request and skips queued texts; requests already received by the provider may still finish and be billed.
+
+Use **List style → Text fields** for individual inputs, or **Array [ ]** to edit the same list as `["Text one", "Text two"]`. Both views preserve text order, Unicode, whitespace, and line breaks. Invalid JSON drafts remain in the array editor and block evaluation until corrected; switching back to text fields requires valid array syntax.
+
+Use **Import texts JSON** in Text list mode to replace the inputs from a file. Accepted formats are `["First text", "Second text"]`, `{ "texts": ["First text", "Second text"] }`, or arrays containing `{ "text": "…" }` objects. Files may contain 1–500 nonempty texts and be up to 5 MB. Unicode and multiline strings are preserved. Invalid imports leave the current inputs unchanged.
+
+Save or select a question list, run your texts, then click **Save outputs to question list**. This also works for a single state. Finished or cancelled runs with completed results can be saved. The saved question list must match the questions used for the run; inputs and settings are captured when you start so later edits do not change the recorded run.
+
+Outputs are stored in `.local/question-lists/<list-id>.runs/`, excluded from Git. Each JSON file contains the question-list name/ID and question snapshot, provider/model, input states, responses, per-text errors/status, timing, and token usage when returned by the provider. Use **Saved outputs** in the Output panel to reopen a run for the selected question list. Old runs keep their original question snapshot even if you later edit the saved list. Output history is local; API credentials are excluded.
+
+**Export outputs JSON** downloads the displayed run, including its input texts, question snapshot, settings, responses, errors, and timing. It works for single or batch runs and reopened saved outputs, without requiring a saved question list. Finish or cancel a run before exporting; partial cancelled runs retain completed responses and mark skipped items.
 
 ## Credentials and request flow
 

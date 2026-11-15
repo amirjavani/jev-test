@@ -32,6 +32,7 @@ export function createApp({ env = process.env, fetchImpl = fetch, storageDir, co
       const usage = normalizeUsage(safeData?.usage);
       // Moderation questions return independent booleans rather than diagnostic fields.
       const decisions = Object.entries(request.questions);
+      let noulProbabilities;
       if (response.ok && decisions.every(([name, question]) => (name === 'allowed' || name.endsWith('_allowed')) && question.type === 'noul')) {
         const results = [];
         for (const [name] of decisions) {
@@ -41,9 +42,10 @@ export function createApp({ env = process.env, fetchImpl = fetch, storageDir, co
           }
           results.push([name, probability >= 0.5]);
         }
+        noulProbabilities = Object.fromEntries(decisions.map(([name]) => [name, safeData.answers[name].noul]));
         safeData = Object.fromEntries(results);
       }
-      res.status(response.ok ? 200 : response.status).json({ ok: response.ok, status: response.status, durationMs: Math.round(performance.now() - start), data: safeData, ...(usage ? { usage } : {}) });
+      res.status(response.ok ? 200 : response.status).json({ ok: response.ok, status: response.status, durationMs: Math.round(performance.now() - start), data: safeData, ...(noulProbabilities ? { noulProbabilities } : {}), ...(usage ? { usage } : {}) });
     } catch (e) {
       res.status(e.name === 'TimeoutError' ? 504 : 502).json({ error: e.name === 'TimeoutError' ? 'The provider timed out after 120 seconds.' : 'Could not reach the provider. Check your network and try again.' });
     }

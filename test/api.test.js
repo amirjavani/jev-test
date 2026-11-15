@@ -86,6 +86,7 @@ test('allowed-only moderation returns a boolean and omits diagnostic fields', as
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.deepEqual(body.data, { allowed });
+    assert.deepEqual(body.noulProbabilities, { allowed: value });
     assert.deepEqual(body.usage, { input_tokens: null, output_tokens: 10, total_tokens: null });
     assert.deepEqual(forwarded, moderationRequest);
   }
@@ -113,7 +114,9 @@ test('combined moderation returns four independent booleans without an overall d
   const moderationRequest = { ...request, questions: definition.questions };
   const response = await post(url, { provider: 'gapgpt', request: moderationRequest });
   assert.equal(response.status, 200);
-  assert.deepEqual((await response.json()).data, { advertising_spam_allowed: true, iran_politics_allowed: false, profanity_allowed: true, respect_allowed: false });
+  const combined = await response.json();
+  assert.deepEqual(combined.data, { advertising_spam_allowed: true, iran_politics_allowed: false, profanity_allowed: true, respect_allowed: false });
+  assert.deepEqual(combined.noulProbabilities, probabilities);
   assert.deepEqual(forwarded, moderationRequest);
   for (const name of Object.keys(probabilities)) {
     const answer = data.answers[name];
@@ -239,8 +242,8 @@ test('output history persists per question list with exact input and question sn
   const list = await (await jsonPost('/api/question-lists', { name: 'Billing', questions: request.questions })).json();
   const route = `/api/question-lists/${list.id}/runs`;
   const run = { provider: 'gapgpt', mode: 'batch', request, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), entries: [
-    { state: { text: 'First text' }, status: 'success', response: { ok: true, status: 200, durationMs: 12, data: { answers: { refund: { type: 'noul', noul: .9 } } } } },
-    { state: { text: 'Second text' }, status: 'error', response: { ok: false, status: 429, durationMs: 5, data: { error: 'Rate limited' } } },
+    { state: { text: 'First text' }, expectedAnswers: { refund: true }, status: 'success', response: { ok: true, status: 200, durationMs: 12, data: { answers: { refund: { type: 'noul', noul: .9 } } } } },
+    { state: { text: 'Second text' }, expectedAnswers: { refund: false }, status: 'error', response: { ok: false, status: 429, durationMs: 5, data: { error: 'Rate limited' } } },
     { state: { text: 'Third text' }, status: 'skipped' },
   ], apiKey: 'do-not-store' };
   const response = await jsonPost(route, run);
@@ -248,6 +251,7 @@ test('output history persists per question list with exact input and question sn
   const saved = await response.json();
   assert.equal(saved.questionList.id, list.id);
   assert.deepEqual(saved.entries.map(entry => entry.state), run.entries.map(entry => entry.state));
+  assert.deepEqual(saved.entries.map(entry => entry.expectedAnswers), run.entries.map(entry => entry.expectedAnswers));
   assert.deepEqual(saved.questionList.questions, request.questions);
   assert.ok(!JSON.stringify(saved).includes('do-not-store'));
   const otherUrl = await serve(t, { env: {}, storageDir: directory });
@@ -256,7 +260,8 @@ test('output history persists per question list with exact input and question sn
   assert.equal(history.runs[0].count, 3);
   assert.equal(history.runs[0].succeeded, 1);
   assert.deepEqual(await (await fetch(`${otherUrl}${route}/${saved.id}`)).json(), saved);
-  assert.equal((await jsonPost(route, { ...run, request: { ...request, questions: { different: { type: 'noul' } } } })).status, 409);
+  assert.equal((await jsonPost(route, { ...run, entries: run.entries.map(entry => ({ ...entry, expectedAnswers: {} })), request: { ...request, questions: { different: { type: 'noul' } } } })).status, 409);
+  assert.equal((await jsonPost(route, { ...run, entries: [{ ...run.entries[0], expectedAnswers: { missing_question: true } }] })).status, 400);
   assert.equal((await jsonPost(route, { ...run, entries: [{ state: 'x', status: 'running' }] })).status, 400);
   assert.equal((await jsonPost('/api/question-lists/../../escape/runs', run)).status, 404);
   const otherList = await (await jsonPost('/api/question-lists', { name: 'Other list', questions: request.questions })).json();
@@ -289,6 +294,8 @@ test('common spam example is public, editable, and keeps local copies and output
   const save = async (base, body) => fetch(`${base}/api/question-lists`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const common = (await getLists(url))[0];
   assert.equal(common.scope, 'common');
+  assert.deepEqual(common.exampleTexts, definition.exampleTexts);
+  assert.ok(common.exampleTexts.every(item => item.text && Object.hasOwn(item.expectedAnswers, 'allowed')));
   assert.equal((await getLists(otherUrl))[0].id, id);
   const edited = { ...common, name: 'Edited shared spam policy', questions: { ...common.questions, extra_check: { type: 'noul', instructions: 'Is this a referral offer?' } } };
   const response = await save(url, edited);
@@ -299,11 +306,14 @@ test('common spam example is public, editable, and keeps local copies and output
   assert.deepEqual(reopened.questions, edited.questions);
   assert.deepEqual(reopened.exampleTexts, definition.exampleTexts);
   assert.equal((await readdir(storageDir)).filter(file => file.endsWith('.json')).length, 0);
-  const copy = await (await save(url, { name: 'My spam policy', questions: edited.questions })).json();
+  const copy = await (await save(url, { name: 'My spam policy', questions: edited.questions, exampleTexts: reopened.exampleTexts })).json();
   assert.equal(copy.scope, 'local');
+  assert.deepEqual(copy.exampleTexts, reopened.exampleTexts);
   assert.notEqual(copy.id, id);
   assert.equal((await getLists(otherUrl)).length, 1);
   assert.equal((await getLists(url)).length, 2);
+  assert.deepEqual((await getLists(url)).find(list => list.id === copy.id).exampleTexts, reopened.exampleTexts);
+  assert.equal((await save(url, { name: 'Invalid examples', questions: edited.questions, exampleTexts: [{ text: 'Test', expectedAnswers: { missing: true } }] })).status, 400);
   const run = { provider: 'gapgpt', mode: 'single', request: { ...request, questions: edited.questions }, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), entries: [{ state: 'Sample text', status: 'success', response: { ok: true, status: 200, data: { answers: {} } } }] };
   const output = await fetch(`${url}/api/question-lists/${id}/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(run) });
   assert.equal(output.status, 200);

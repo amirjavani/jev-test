@@ -1,5 +1,26 @@
 [
-  "The customer requests a refund for a duplicate payment.",
-  "The app crashes whenever I try to sign in. Please help.",
-  "Our payment processing is down for every customer. This needs immediate attention."
+  {
+    "text": "The customer requests a refund for a duplicate payment.",
+    "expectedAnswers": {
+      "refund": true,
+      "team": "billing",
+      "urgency": 0
+    }
+  },
+  {
+    "text": "The app crashes whenever I try to sign in. Please help.",
+    "expectedAnswers": {
+      "refund": false,
+      "team": "technical",
+      "urgency": 1
+    }
+  },
+  {
+    "text": "Our payment processing is down for every customer. This needs immediate attention.",
+    "expectedAnswers": {
+      "refund": false,
+      "team": "technical",
+      "urgency": 2
+    }
+  }
 ]

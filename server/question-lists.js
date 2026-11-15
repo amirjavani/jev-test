@@ -4,12 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { normalizeList } from '../shared/question-lists.js';
 import { normalizeRun, sameQuestions } from '../shared/runs.js';
+import { normalizeExamples } from '../shared/question-examples.js';
 
 const validId = id => /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id);
 export function registerQuestionLists(app, directory = fileURLToPath(new URL('../.local/question-lists/', import.meta.url)), commonDirectory = fileURLToPath(new URL('../common/question-lists/', import.meta.url))) {
   const readList = async (folder, id, scope) => {
     const raw = JSON.parse(await readFile(path.join(folder, `${id}.json`), 'utf8'));
-    const exampleTexts = Array.isArray(raw.exampleTexts) && raw.exampleTexts.length <= 500 && raw.exampleTexts.every(text => typeof text === 'string' && text.trim()) ? raw.exampleTexts : undefined;
+    const exampleTexts = Array.isArray(raw.exampleTexts) ? normalizeExamples(raw.exampleTexts, raw.questions, raw.exampleExpectedAnswers) : undefined;
     return { ...normalizeList(raw), id, scope, updatedAt: raw.updatedAt, ...(exampleTexts ? { exampleTexts } : {}) };
   };
   const loadList = async id => {
@@ -79,7 +80,13 @@ export function registerQuestionLists(app, directory = fileURLToPath(new URL('..
     try { existing = await loadList(id); } catch (e) { if (e.code !== 'ENOENT') return res.status(500).json({ error: 'Could not read the existing question list.' }); }
     const scope = existing?.scope === 'common' ? 'common' : 'local';
     const targetDirectory = scope === 'common' ? commonDirectory : directory;
-    const saved = { ...list, id, scope, updatedAt: new Date().toISOString(), ...(existing?.exampleTexts ? { exampleTexts: existing.exampleTexts } : {}) };
+    let exampleTexts;
+    try {
+      exampleTexts = existing?.exampleTexts
+        ? existing.exampleTexts.map(item => ({ text: item.text, expectedAnswers: Object.fromEntries(Object.entries(item.expectedAnswers).filter(([name]) => Object.hasOwn(list.questions, name) && sameQuestions(existing.questions[name], list.questions[name]))) }))
+        : req.body.exampleTexts !== undefined ? normalizeExamples(req.body.exampleTexts, list.questions) : undefined;
+    } catch (e) { return res.status(400).json({ error: e.message }); }
+    const saved = { ...list, id, scope, updatedAt: new Date().toISOString(), ...(exampleTexts ? { exampleTexts } : {}) };
     const temporary = path.join(targetDirectory, `${id}.${randomUUID()}.tmp`);
     try {
       await mkdir(targetDirectory, { recursive: true });

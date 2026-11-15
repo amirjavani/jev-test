@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { Braces, Plus, Trash2, Upload } from 'lucide-react';
 import { MAX_TEXT_FILE_BYTES, parseTextArray, parseTextList } from '../shared/text-files.js';
 
-export default function StateEditor({ mode, setMode, state, setState, format, setFormat, texts, setTexts, running, listStyle, setListStyle, arrayText, setArrayText }) {
+export default function StateEditor({ mode, setMode, state, setState, format, setFormat, texts, setTexts, running, listStyle, setListStyle, arrayText, setArrayText, children }) {
   const input = useRef(null);
   const runningRef = useRef(running);
   runningRef.current = running;
@@ -54,5 +54,6 @@ export default function StateEditor({ mode, setMode, state, setState, format, se
       <div className="state-format-row"><p className="section-description">The shared context for every question.</p><div className="segmented"><button className={format === 'text' ? 'active' : ''} onClick={() => { if (format === 'json') { try { const parsed = JSON.parse(state); setState(typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2)); } catch { /* Preserve unfinished input. */ } } setFormat('text'); }}>Text</button><button className={format === 'json' ? 'active' : ''} onClick={() => { if (format === 'text') setState(JSON.stringify(state, null, 2)); setFormat('json'); }}>JSON</button></div></div>
       <textarea aria-label="State input" className={`state-input ${format === 'json' ? 'code' : ''}`} value={state} onChange={e => setState(e.target.value)} rows={5} spellCheck="false" /><div className="editor-footer"><span><Braces size={13} />{format === 'json' ? 'Structured context' : 'Plain text'}</span><span>{state.length.toLocaleString()} characters</span></div>
     </>}
+    {children}
   </section>;
 }

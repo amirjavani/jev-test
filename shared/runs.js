@@ -1,4 +1,5 @@
 import { validateRequest } from './validation.js';
+import { responseUsage } from './usage.js';
 
 export const sameQuestions = (a, b) => {
   const ordered = value => Array.isArray(value) ? value.map(ordered) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
@@ -38,7 +39,7 @@ export function normalizeRun(value) {
     if (entry.status === 'success' && (!entry.response || entry.response.ok !== true)) throw new Error('Successful results need a response.');
     return { index, state: entry.state, status: entry.status,
       ...(entry.error ? { error: String(entry.error) } : {}),
-      ...(entry.response ? { response: { ok: entry.response.ok === true, status: entry.response.status, durationMs: entry.response.durationMs, data: entry.response.data, ...(entry.response.error ? { error: String(entry.response.error) } : {}) } } : {}),
+      ...(entry.response ? { response: { ok: entry.response.ok === true, status: entry.response.status, durationMs: entry.response.durationMs, data: entry.response.data, ...(responseUsage(entry.response) ? { usage: responseUsage(entry.response) } : {}), ...(entry.response.error ? { error: String(entry.response.error) } : {}) } } : {}),
     };
   });
   if (!entries.some(entry => entry.status === 'success' || entry.status === 'error')) throw new Error('There are no completed results to save.');

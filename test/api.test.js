@@ -44,6 +44,7 @@ test('forwards the exact request to GapGPT with server-only bearer auth', async 
   assert.deepEqual(JSON.parse(call.options.body), request);
   const body = await response.json();
   assert.deepEqual(body.data, data);
+  assert.deepEqual(body.usage, { input_tokens: 120, output_tokens: 12, total_tokens: 132 });
   assert.equal(body.ok, true);
   assert.equal(typeof body.durationMs, 'number');
 });
@@ -55,6 +56,88 @@ test('direct provider and experimental headers are selected correctly', async t 
   assert.equal(call.options.headers['TypeSafe-Danger-Zone-Images'], 'true');
   assert.equal(call.options.headers['TypeSafe-Danger-Zone-Long-Context'], 'true');
 });
+
+test('GapGPT receives uploaded images, references, and the experimental images header', async t => {
+  let forwarded;
+  const url = await serve(t, { env: { GAPGPT_API_KEY: 'secret-gap' }, fetchImpl: async (endpoint, options) => {
+    forwarded = { endpoint, headers: options.headers, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({ answers: { circle: { type: 'noul', noul: 0.99 } } }));
+  } });
+  const imageRequest = { model: request.model, state: { context: 'Look at the pictures.', images: ['uuid-photo'] }, questions: { circle: { type: 'noul', instructions: 'Is there a circle in `images`?' } }, assets: { 'uuid-photo': { type: 'image', format: 'png', data_base64: 'image-bytes' } } };
+  const response = await post(url, { provider: 'gapgpt', request: imageRequest });
+  assert.equal(response.status, 200);
+  assert.equal(forwarded.endpoint, 'https://api.gapgpt.app/v1/systemone');
+  assert.equal(forwarded.headers['TypeSafe-Danger-Zone-Images'], 'true');
+  assert.deepEqual(forwarded.body, imageRequest);
+  assert.equal((await response.json()).data.answers.circle.noul, 0.99);
+});
+test('allowed-only moderation returns a boolean and omits diagnostic fields', async t => {
+  const definition = JSON.parse(await readFile(new URL('../common/question-lists/89a42172-28b6-48dc-b63a-545e45fce988.json', import.meta.url), 'utf8'));
+  let probability;
+  let forwarded;
+  const url = await serve(t, { env: { GAPGPT_API_KEY: 'secret-gap' }, fetchImpl: async (_endpoint, options) => {
+    forwarded = JSON.parse(options.body);
+    return new Response(JSON.stringify({ answers: { allowed: { type: 'noul', noul: probability }, reason: 'diagnostic', phone: 'example', email: 'example' }, usage: { output_tokens: 10 } }));
+  } });
+  const moderationRequest = { ...request, state: { text: 'لطفاً پاسخ را به ایمیلم بفرستید: reader@example.com' }, questions: definition.questions };
+  for (const [value, allowed] of [[0, false], [0.49, false], [0.5, true], [0.99, true], [1, true]]) {
+    probability = value;
+    const response = await post(url, { provider: 'gapgpt', request: moderationRequest });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(body.data, { allowed });
+    assert.deepEqual(body.usage, { input_tokens: null, output_tokens: 10, total_tokens: null });
+    assert.deepEqual(forwarded, moderationRequest);
+  }
+  for (const value of [undefined, null, '0.9', -0.1, 1.1]) {
+    probability = value;
+    const response = await post(url, { provider: 'gapgpt', request: moderationRequest });
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.match(body.error, /valid allowed probability/);
+    assert.equal(body.usage.output_tokens, 10);
+    assert.ok(!Object.hasOwn(body, 'allowed'));
+  }
+});
+
+test('combined moderation returns four independent booleans without an overall decision', async t => {
+  const definition = JSON.parse(await readFile(new URL('../common/question-lists/b5d81d1a-398e-4e8c-a041-62c3e7cb9075.json', import.meta.url), 'utf8'));
+  const probabilities = { advertising_spam_allowed: 0.9, iran_politics_allowed: 0.1, profanity_allowed: 0.7, respect_allowed: 0.2 };
+  assert.deepEqual(Object.keys(definition.questions), Object.keys(probabilities));
+  const data = { answers: Object.fromEntries(Object.entries(probabilities).map(([name, noul]) => [name, { type: 'noul', noul }])), reason: 'not needed', phone: 'not needed' };
+  let forwarded;
+  const url = await serve(t, { env: { GAPGPT_API_KEY: 'secret-gap' }, fetchImpl: async (_endpoint, options) => {
+    forwarded = JSON.parse(options.body);
+    return new Response(JSON.stringify(data));
+  } });
+  const moderationRequest = { ...request, questions: definition.questions };
+  const response = await post(url, { provider: 'gapgpt', request: moderationRequest });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).data, { advertising_spam_allowed: true, iran_politics_allowed: false, profanity_allowed: true, respect_allowed: false });
+  assert.deepEqual(forwarded, moderationRequest);
+  for (const name of Object.keys(probabilities)) {
+    const answer = data.answers[name];
+    delete data.answers[name];
+    const invalid = await post(url, { provider: 'gapgpt', request: moderationRequest });
+    assert.equal(invalid.status, 502);
+    const body = await invalid.json();
+    assert.ok(body.error.includes(name));
+    assert.ok(!Object.hasOwn(body, 'data'), 'missing answers must not return partial decisions');
+    data.answers[name] = answer;
+  }
+  const mixed = await post(url, { provider: 'gapgpt', request: { ...moderationRequest, questions: { ...definition.questions, refund: request.questions.refund } } });
+  assert.equal(mixed.status, 200);
+  assert.deepEqual((await mixed.json()).data, data, 'mixed question configurations must retain the full upstream response');
+});
+
+test('allowed-only moderation preserves upstream errors', async t => {
+  const data = { error: 'Rate limited' };
+  const url = await serve(t, { env: { GAPGPT_API_KEY: 'secret-gap' }, fetchImpl: async () => new Response(JSON.stringify(data), { status: 429 }) });
+  const response = await post(url, { provider: 'gapgpt', request: { ...request, questions: { allowed: { type: 'noul', instructions: 'Is this message allowed?' } } } });
+  assert.equal(response.status, 429);
+  assert.deepEqual((await response.json()).data, data);
+});
+
 test('preserves upstream status and body while redacting echoed secrets', async t => {
   const url = await serve(t, { env: { GAPGPT_API_KEY: 'secret-gap' }, fetchImpl: async () => new Response('{"error":"bad key secret-gap"}', { status: 401 }) });
   const response = await post(url, { provider: 'gapgpt', request });
@@ -197,7 +280,7 @@ test('common spam example is public, editable, and keeps local copies and output
   const definition = JSON.parse(fixture);
   normalizeList(definition);
   assert.ok(definition.exampleTexts.length > 0);
-  assert.deepEqual(Object.keys(definition.questions), ['advertising_spam', 'contains_phone_number', 'contains_link', 'contains_contact_details', 'allowed']);
+  assert.deepEqual(Object.keys(definition.questions), ['allowed']);
   await mkdir(commonDir);
   await writeFile(path.join(commonDir, `${id}.json`), fixture);
   const url = await serve(t, { env: {}, commonDir, storageDir });

@@ -1,6 +1,7 @@
 import express from 'express';
 import { validateRequest } from '../shared/validation.js';
 import { registerQuestionLists } from './question-lists.js';
+import { normalizeUsage } from '../shared/usage.js';
 
 export function createApp({ env = process.env, fetchImpl = fetch, storageDir, commonDir } = {}) {
   const app = express();
@@ -27,8 +28,22 @@ export function createApp({ env = process.env, fetchImpl = fetch, storageDir, co
       let data;
       try { data = JSON.parse(raw); } catch { data = { message: raw.slice(0, 4000) }; }
       // Redact the credential even if an upstream error unexpectedly echoes it.
-      const safeData = JSON.parse(JSON.stringify(data).split(config.key.trim()).join('[REDACTED]'));
-      res.status(response.ok ? 200 : response.status).json({ ok: response.ok, status: response.status, durationMs: Math.round(performance.now() - start), data: safeData });
+      let safeData = JSON.parse(JSON.stringify(data).split(config.key.trim()).join('[REDACTED]'));
+      const usage = normalizeUsage(safeData?.usage);
+      // Moderation questions return independent booleans rather than diagnostic fields.
+      const decisions = Object.entries(request.questions);
+      if (response.ok && decisions.every(([name, question]) => (name === 'allowed' || name.endsWith('_allowed')) && question.type === 'noul')) {
+        const results = [];
+        for (const [name] of decisions) {
+          const probability = safeData?.answers?.[name]?.noul;
+          if (typeof probability !== 'number' || !Number.isFinite(probability) || probability < 0 || probability > 1) {
+            return res.status(502).json({ error: `The provider did not return a valid allowed probability for ${name}. Try again.`, ...(usage ? { usage } : {}) });
+          }
+          results.push([name, probability >= 0.5]);
+        }
+        safeData = Object.fromEntries(results);
+      }
+      res.status(response.ok ? 200 : response.status).json({ ok: response.ok, status: response.status, durationMs: Math.round(performance.now() - start), data: safeData, ...(usage ? { usage } : {}) });
     } catch (e) {
       res.status(e.name === 'TimeoutError' ? 504 : 502).json({ error: e.name === 'TimeoutError' ? 'The provider timed out after 120 seconds.' : 'Could not reach the provider. Check your network and try again.' });
     }

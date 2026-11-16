@@ -46,10 +46,10 @@ export default function RunOutput({ run, setRun, built, running, onRun, onCancel
   const requestPreview = built.request && (built.states.length === 1 ? built.request : built.states.map(state => ({ ...built.request, state })));
   const canApplyLabels = run?.finishedAt && !running && built.request && sameQuestions(run.request, built.request)
     && sameQuestions(entries.map(entry => entry.state), built.states)
-    && !sameQuestions(entries.map(entry => entry.expectedAnswers || {}), built.expectedAnswers);
+    && (!sameQuestions(entries.map(entry => entry.expectedAnswers || {}), built.expectedAnswers) || !sameQuestions(entries.map(entry => entry.comparisonDisabled === true), built.comparisonDisabled));
   function applyLabels() {
     const { id, savedAt, evaluation, ...snapshot } = run;
-    setRun({ ...snapshot, entries: entries.map((entry, index) => ({ ...entry, expectedAnswers: structuredClone(built.expectedAnswers[index]) })) });
+    setRun({ ...snapshot, entries: entries.map((entry, index) => ({ ...entry, expectedAnswers: structuredClone(built.expectedAnswers[index]), comparisonDisabled: built.comparisonDisabled?.[index] === true })) });
     setMessage('Applied current labels to existing answers. No API call was made.');
   }
   async function copy() {
@@ -85,9 +85,11 @@ export default function RunOutput({ run, setRun, built, running, onRun, onCancel
     } catch (e) { setError(e.message); } finally { setLoading(false); }
   }
   return <aside className="output-column"><section className="panel output-panel">
+    <div className="run-top">{built.warnings?.map(warning => <p className="comparison-warning" role="status" key={warning}>{warning} You can run this evaluation.</p>)}{built.error && <p className="validation-message">{built.error}</p>}<button className="run-button" disabled={saving || loading || (!running && (!!built.error || !keyLoaded))} onClick={running ? onCancel : onRun}>{running ? <><LoaderCircle className="spin" size={17} />{run?.mode === 'batch' ? 'Cancel remaining texts' : 'Cancel evaluation'}</> : <><Play size={15} fill="currentColor" />Run {built.states?.length > 1 ? `${built.states.length} texts sequentially` : 'evaluation'}<span>→</span></>}</button></div>
     <div className="section-heading"><span className="output-icon"><FlaskConical size={17} /></span><h2>Output</h2><span className={`output-status ${run?.finishedAt ? 'success' : ''}`}>{running ? `${complete}/${entries.length} DONE` : run?.finishedAt ? 'FINISHED' : 'READY'}</span></div>
     <div className="output-history"><label htmlFor="saved-outputs">Saved outputs{savedList ? ` · ${savedList.name}` : ''}</label><select id="saved-outputs" value={historyId} disabled={!savedList || running || loading || saving} onChange={e => load(e.target.value)}><option value="">{loading ? 'Loading…' : savedList ? 'Choose a saved run' : 'Select a saved question list first'}</option>{history.map(item => <option key={item.id} value={item.id}>{new Date(item.startedAt).toLocaleString()} · {item.succeeded}/{item.count} succeeded</option>)}</select></div>
     {run && <TokenUsage usage={usageSummary.totals} summary={usageSummary} />}
+    {evaluation?.warnings?.map(warning => <p className="comparison-warning output-warning" role="status" key={warning}>{warning}</p>)}
     {evaluation && <AccuracySummary evaluation={evaluation} />}
     <div className="output-tabs">{[['results', 'Results'], ['raw', 'Raw JSON'], ['request', 'Request']].map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}<button aria-label="Copy JSON" title="Copy JSON" className="copy-button" disabled={tab === 'request' ? !requestPreview : !entries.length} onClick={copy}>{copied ? <Check size={15} /> : <Copy size={15} />}</button></div>
     <div className="output-body" aria-live="polite">
@@ -103,7 +105,7 @@ export default function RunOutput({ run, setRun, built, running, onRun, onCancel
         {['success', 'error', 'cancelled'].includes(entry.status) && <TokenUsage usage={responseUsage(entry.response)} />}
       </div></details>) : <div className="empty-output"><div className="empty-illustration"><Layers3 size={30} /></div><h3>Your next decision starts here</h3><p>Test text, images, or a list of texts. Each response appears separately as it finishes.</p></div>}
     </div>
-    <div className="run-area">{built.error && <p className="validation-message">{built.error}</p>}<button className="run-button" disabled={saving || loading || (!running && (!!built.error || !keyLoaded))} onClick={running ? onCancel : onRun}>{running ? <><LoaderCircle className="spin" size={17} />{run?.mode === 'batch' ? 'Cancel remaining texts' : 'Cancel evaluation'}</> : <><Play size={15} fill="currentColor" />Run {built.states?.length > 1 ? `${built.states.length} texts sequentially` : 'evaluation'}<span>→</span></>}</button>
+    <div className="run-area">
       {canApplyLabels && <button className="save-outputs" disabled={saving || loading} onClick={applyLabels}><Check size={14} />Apply current labels · reuse answers</button>}
       <button className="save-outputs" disabled={!hasResults || !run?.finishedAt || !matches || running || saving || loading || Boolean(run?.id)} onClick={save}><Save size={14} />{saving ? 'Saving…' : run?.id ? 'Output saved' : 'Save outputs to question list'}</button>
       <button className="save-outputs" disabled={!hasResults || !run?.finishedAt || running || loading} onClick={exportOutputs}><Download size={14} />Export outputs JSON</button>

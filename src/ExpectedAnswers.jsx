@@ -25,6 +25,6 @@ export default function ExpectedAnswers({ questions, value = {}, onChange, disab
       </select></div>;
     })}
     {Object.keys(value).length > 0 && <button type="button" className="expected-clear" onClick={() => onChange({})}>Clear</button>}
-    {questions && Object.keys(value).some(name => !Object.hasOwn(questions, name)) && <p className="library-error">Some labels refer to removed questions. Clear labels or restore those questions.</p>}
+    {questions && Object.keys(value).some(name => !Object.hasOwn(questions, name)) && <p className="library-error">Dataset labels do not match the selected questions. You can still run; outputs will be shown without accuracy comparison.</p>}
   </fieldset>;
 }

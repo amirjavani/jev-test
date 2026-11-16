@@ -288,7 +288,10 @@ test('output history persists per question list with exact input and question sn
   assert.equal(history.runs[0].succeeded, 1);
   assert.deepEqual(await (await fetch(`${otherUrl}${route}/${saved.id}`)).json(), saved);
   assert.equal((await jsonPost(route, { ...run, entries: run.entries.map(entry => ({ ...entry, expectedAnswers: {} })), request: { ...request, questions: { different: { type: 'noul' } } } })).status, 409);
-  assert.equal((await jsonPost(route, { ...run, entries: [{ ...run.entries[0], expectedAnswers: { missing_question: true } }] })).status, 400);
+  const mismatched = await jsonPost(route, { ...run, entries: [{ ...run.entries[0], expectedAnswers: { missing_question: true } }] });
+  assert.equal(mismatched.status, 200);
+  const mismatchedSaved = await mismatched.json();
+  assert.deepEqual(mismatchedSaved.entries[0].expectedAnswers, { missing_question: true });
   assert.equal((await jsonPost(route, { ...run, entries: [{ state: 'x', status: 'running' }] })).status, 400);
   assert.equal((await jsonPost('/api/question-lists/../../escape/runs', run)).status, 404);
   const otherList = await (await jsonPost('/api/question-lists', { name: 'Other list', questions: request.questions })).json();

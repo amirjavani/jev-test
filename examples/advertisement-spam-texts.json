@@ -352,5 +352,41 @@
     "expectedAnswers": {
       "allowed": true
     }
+  },
+  {
+    "text": "سلام و سپاس از برنامه ی خوبتون\nاگر مقدور هست امکان جستجوی اسامی افراد برای دنبال کردن کسی که در نظر داریم رو فراهم کنید",
+    "expectedAnswers": {
+      "allowed": true
+    }
+  },
+  {
+    "text": "میخوام کد معرفم رو بدم به فرد دیگری ثبت نام کنه. از کجا بیارم کد معرف رو؟",
+    "expectedAnswers": {
+      "allowed": true
+    }
+  },
+  {
+    "text": "چطور در همین برنامه کاربرها رو جستجو کنم و دنبال کنم؟",
+    "expectedAnswers": {
+      "allowed": true
+    }
+  },
+  {
+    "text": "کد دعوت ثبت‌نام خودم رو از کدوم بخش برنامه بردارم؟",
+    "expectedAnswers": {
+      "allowed": true
+    }
+  },
+  {
+    "text": "با کد معرف من در یک فروشگاه بیرون از این برنامه خرید کنید و تخفیف بگیرید.",
+    "expectedAnswers": {
+      "allowed": false
+    }
+  },
+  {
+    "text": "لینک دعوت همین برنامه: https://example.com/invite/demo",
+    "expectedAnswers": {
+      "allowed": false
+    }
   }
 ]

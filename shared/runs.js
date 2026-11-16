@@ -9,8 +9,8 @@ export const sameQuestions = (a, b) => {
 };
 
 // Await each evaluation before starting the next; failed items do not stop the queue.
-export async function evaluateSequentially({ states, expectedAnswers = [], evaluate, signal, onUpdate }) {
-  const entries = states.map((state, index) => ({ index, state, ...(expectedAnswers[index] && Object.keys(expectedAnswers[index]).length ? { expectedAnswers: structuredClone(expectedAnswers[index]) } : {}), status: 'pending' }));
+export async function evaluateSequentially({ states, expectedAnswers = [], comparisonDisabled = [], evaluate, signal, onUpdate }) {
+  const entries = states.map((state, index) => ({ index, state, ...(expectedAnswers[index] && Object.keys(expectedAnswers[index]).length ? { expectedAnswers: structuredClone(expectedAnswers[index]) } : {}), ...(comparisonDisabled[index] ? { comparisonDisabled: true } : {}), status: 'pending' }));
   const publish = () => onUpdate(entries.map(entry => ({ ...entry })));
   publish();
   for (const entry of entries) {
@@ -39,10 +39,11 @@ export function normalizeRun(value) {
     if (!entry || !['success', 'error', 'cancelled', 'skipped'].includes(entry.status)) throw new Error('Wait for the run to finish before saving.');
     validateRequest({ ...value.request, state: entry.state });
     if (entry.status === 'success' && (!entry.response || entry.response.ok !== true)) throw new Error('Successful results need a response.');
-    const expectedAnswers = normalizeExpectedAnswers(entry.expectedAnswers, value.request.questions);
+    const expectedAnswers = normalizeExpectedAnswers(entry.expectedAnswers);
     const noulProbabilities = normalizeNoulProbabilities(entry.response?.noulProbabilities);
     return { index, state: entry.state, status: entry.status,
       ...(Object.keys(expectedAnswers).length ? { expectedAnswers } : {}),
+      ...(entry.comparisonDisabled === true ? { comparisonDisabled: true } : {}),
       ...(entry.error ? { error: String(entry.error) } : {}),
       ...(entry.response ? { response: { ok: entry.response.ok === true, status: entry.response.status, durationMs: entry.response.durationMs, data: entry.response.data, ...(noulProbabilities ? { noulProbabilities } : {}), ...(responseUsage(entry.response) ? { usage: responseUsage(entry.response) } : {}), ...(entry.response.error ? { error: String(entry.response.error) } : {}) } } : {}),
     };
@@ -53,5 +54,5 @@ export function normalizeRun(value) {
   return { version: 1, mode: value.mode, provider: value.provider, longContext: value.longContext === true,
     request: { model, state, questions, ...(assets ? { assets } : {}) },
     startedAt: value.startedAt, finishedAt: value.finishedAt, entries,
-    ...(evaluation.summary.labeled ? { evaluation } : {}) };
+    ...(evaluation.summary.labeled || evaluation.warnings.length ? { evaluation } : {}) };
 }

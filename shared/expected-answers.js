@@ -24,6 +24,23 @@ export function withQuestionLabels(record, questions, answers) {
   return { ...record, expectedAnswers: answers, expectedAnswerScopes, unmatchedExpectedAnswers };
 }
 
+// Inactive scoped labels stay visible as reference data without being reassigned
+// to a different policy that happens to use the same question name.
+export function referenceLabels(record, questions) {
+  const active = questionLabels(record, questions);
+  if (Object.keys(active).length || !Object.keys(record.expectedAnswers || {}).length) return active;
+  return record.expectedAnswers;
+}
+
+export function expectedAnswerWarning(entry, questions) {
+  const answers = entry.expectedAnswers || {};
+  if (!Object.keys(answers).length) return '';
+  if (entry.comparisonDisabled === true) return 'Dataset expected answers belong to different question definitions. Model outputs are shown without accuracy comparison.';
+  try { normalizeExpectedAnswers(answers, questions); }
+  catch { return 'Dataset expected answers do not match the selected questions (names or answer types). Model outputs are shown without accuracy comparison.'; }
+  return '';
+}
+
 // Labels are local metadata, never part of a System One request.
 export function normalizeExpectedAnswers(value = {}, questions) {
   if (!object(value)) throw new Error('Expected answers must be an object keyed by question name.');

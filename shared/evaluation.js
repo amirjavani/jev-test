@@ -1,4 +1,4 @@
-import { normalizeExpectedAnswers } from './expected-answers.js';
+import { normalizeExpectedAnswers, expectedAnswerWarning } from './expected-answers.js';
 
 const own = (value, key) => value !== null && typeof value === 'object' && Object.hasOwn(value, key);
 const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -58,6 +58,7 @@ function prediction(entry, name, question) {
 }
 
 export function compareEntry(entry, questions) {
+  const warning = expectedAnswerWarning(entry, questions);
   return Object.fromEntries(Object.entries(questions).map(([name, question]) => {
     const actual = { type: question.type, ...prediction(entry, name, question) };
     if (!own(entry.expectedAnswers, name)) return [name, { status: 'unlabeled', ...actual }];
@@ -65,6 +66,7 @@ export function compareEntry(entry, questions) {
     const base = { expected, ...actual };
     try { normalizeExpectedAnswers({ [name]: expected }, { [name]: question }); }
     catch { return [name, { ...base, status: 'unavailable', reason: 'Invalid expected answer' }]; }
+    if (warning) return [name, { status: 'unlabeled', ...actual, reason: 'Comparison skipped: dataset labels do not match the selected questions.' }];
     if (['pending', 'running'].includes(entry.status)) return [name, { ...base, status: 'pending', reason: 'Waiting for model answer' }];
     if (entry.status !== 'success' || entry.response?.ok !== true) return [name, { ...base, status: 'unavailable', reason: entry.status === 'skipped' ? 'Input skipped' : 'No successful model response' }];
     if (actual.predicted === null) return [name, { ...base, status: 'unavailable', reason: 'Model answer missing or invalid' }];
@@ -103,8 +105,9 @@ export function evaluateDataset(entries, questions) {
     const result = accuracy(count);
     const inputStatus = !result.labeled ? 'unlabeled' : result.unavailable ? 'unavailable' : result.pending ? 'pending' : result.review ? 'review' : result.wrong ? 'wrong' : 'correct';
     inputCounts[inputStatus]++;
-    return { index: entry.index ?? index, comparisons, ...result };
+    return { index: entry.index ?? index, comparisons, ...result, ...(expectedAnswerWarning(entry, questions) ? { warning: expectedAnswerWarning(entry, questions), referenceAnswers: entry.expectedAnswers } : {}) };
   });
   return { version: 1, rules: { ...comparisonRules }, summary: accuracy(total), inputs: accuracy(inputCounts),
-    perQuestion: Object.fromEntries(Object.entries(perQuestion).map(([name, count]) => [name, accuracy(count)])), entries: evaluated };
+    perQuestion: Object.fromEntries(Object.entries(perQuestion).map(([name, count]) => [name, accuracy(count)])), entries: evaluated,
+    warnings: [...new Set(evaluated.map(entry => entry.warning).filter(Boolean))] };
 }

@@ -27,6 +27,7 @@ test('config reports availability without exposing keys, missing key blocks upst
   const configText = await (await fetch(`${url}/api/config`)).text();
   assert.ok(!configText.includes('secret-direct'));
   const config = JSON.parse(configText);
+  assert.equal(config.capabilities.noulProbabilities, true);
   assert.equal(config.providers[0].configured, false);
   assert.equal(config.providers[1].configured, true);
   const response = await post(url, { provider: 'gapgpt', request });
@@ -44,6 +45,7 @@ test('forwards the exact request to GapGPT with server-only bearer auth', async 
   assert.deepEqual(JSON.parse(call.options.body), request);
   const body = await response.json();
   assert.deepEqual(body.data, data);
+  assert.deepEqual(body.noulProbabilities, { refund: .98 });
   assert.deepEqual(body.usage, { input_tokens: 120, output_tokens: 12, total_tokens: 132 });
   assert.equal(body.ok, true);
   assert.equal(typeof body.durationMs, 'number');
@@ -80,7 +82,7 @@ test('allowed-only moderation returns a boolean and omits diagnostic fields', as
     return new Response(JSON.stringify({ answers: { allowed: { type: 'noul', noul: probability }, reason: 'diagnostic', phone: 'example', email: 'example' }, usage: { output_tokens: 10 } }));
   } });
   const moderationRequest = { ...request, state: { text: 'لطفاً پاسخ را به ایمیلم بفرستید: reader@example.com' }, questions: definition.questions };
-  for (const [value, allowed] of [[0, false], [0.49, false], [0.5, true], [0.99, true], [1, true]]) {
+  for (const [value, allowed] of [[0, false], [0.29999, false], [0.3, 'human'], [0.49, 'human'], [0.5, 'human'], [0.9, 'human'], [0.90001, true], [0.99, true], [1, true]]) {
     probability = value;
     const response = await post(url, { provider: 'gapgpt', request: moderationRequest });
     assert.equal(response.status, 200);
@@ -101,10 +103,9 @@ test('allowed-only moderation returns a boolean and omits diagnostic fields', as
   }
 });
 
-test('combined moderation returns four independent booleans without an overall decision', async t => {
-  const definition = JSON.parse(await readFile(new URL('../common/question-lists/b5d81d1a-398e-4e8c-a041-62c3e7cb9075.json', import.meta.url), 'utf8'));
-  const probabilities = { advertising_spam_allowed: 0.9, iran_politics_allowed: 0.1, profanity_allowed: 0.7, respect_allowed: 0.2 };
-  assert.deepEqual(Object.keys(definition.questions), Object.keys(probabilities));
+test('combined moderation returns seven independent three-way decisions without an overall decision', async t => {
+  const probabilities = { advertising_spam_allowed: 0.9, iran_politics_allowed: 0.1, profanity_allowed: 0.7, respect_allowed: 0.2, hate_discrimination_allowed: 0.8, sexual_content_allowed: 0.3, privacy_allowed: 0.5 };
+  const definition = { questions: Object.fromEntries(Object.keys(probabilities).map(name => [name, { type: 'noul', instructions: 'Is this text allowed under this policy?' }])) };
   const data = { answers: Object.fromEntries(Object.entries(probabilities).map(([name, noul]) => [name, { type: 'noul', noul }])), reason: 'not needed', phone: 'not needed' };
   let forwarded;
   const url = await serve(t, { env: { GAPGPT_API_KEY: 'secret-gap' }, fetchImpl: async (_endpoint, options) => {
@@ -115,7 +116,7 @@ test('combined moderation returns four independent booleans without an overall d
   const response = await post(url, { provider: 'gapgpt', request: moderationRequest });
   assert.equal(response.status, 200);
   const combined = await response.json();
-  assert.deepEqual(combined.data, { advertising_spam_allowed: true, iran_politics_allowed: false, profanity_allowed: true, respect_allowed: false });
+  assert.deepEqual(combined.data, { advertising_spam_allowed: 'human', iran_politics_allowed: false, profanity_allowed: 'human', respect_allowed: false, hate_discrimination_allowed: 'human', sexual_content_allowed: 'human', privacy_allowed: 'human' });
   assert.deepEqual(combined.noulProbabilities, probabilities);
   assert.deepEqual(forwarded, moderationRequest);
   for (const name of Object.keys(probabilities)) {
@@ -128,9 +129,35 @@ test('combined moderation returns four independent booleans without an overall d
     assert.ok(!Object.hasOwn(body, 'data'), 'missing answers must not return partial decisions');
     data.answers[name] = answer;
   }
+  data.answers.refund = { type: 'noul', noul: .65 };
   const mixed = await post(url, { provider: 'gapgpt', request: { ...moderationRequest, questions: { ...definition.questions, refund: request.questions.refund } } });
   assert.equal(mixed.status, 200);
-  assert.deepEqual((await mixed.json()).data, data, 'mixed question configurations must retain the full upstream response');
+  const mixedBody = await mixed.json();
+  assert.deepEqual(mixedBody.data, data, 'mixed question configurations must retain the full upstream response');
+  assert.deepEqual(mixedBody.noulProbabilities, { ...probabilities, refund: .65 });
+});
+
+test('new Noul evaluations fail explicitly rather than succeeding without original percentages', async t => {
+  let answer;
+  const url = await serve(t, { env: { GAPGPT_API_KEY: 'secret-gap' }, fetchImpl: async () => new Response(JSON.stringify({ answers: { refund: answer }, usage: { input_tokens: 12, output_tokens: 1 } })) });
+  for (const invalid of [true, false, { type: 'noul' }, { type: 'noul', noul: null }, { type: 'noul', noul: '0.9' }, { type: 'noul', noul: -1 }, { type: 'noul', noul: 1.01 }, { type: 'choice', noul: .9 }]) {
+    answer = invalid;
+    const response = await post(url, { provider: 'gapgpt', request });
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.equal(body.ok, false);
+    assert.match(body.error, /valid probability for refund/);
+    assert.ok(!Object.hasOwn(body, 'data'));
+    assert.equal(body.usage.input_tokens, 12);
+  }
+  for (const probability of [0, .123456, .5, 1]) {
+    answer = { type: 'noul', noul: probability };
+    const response = await post(url, { provider: 'gapgpt', request });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.noulProbabilities.refund, probability);
+    assert.equal(body.data.answers.refund.noul, probability);
+  }
 });
 
 test('allowed-only moderation preserves upstream errors', async t => {
@@ -283,11 +310,12 @@ test('common spam example is public, editable, and keeps local copies and output
   const id = '89a42172-28b6-48dc-b63a-545e45fce988';
   const fixture = await readFile(new URL(`../common/question-lists/${id}.json`, import.meta.url), 'utf8');
   const definition = JSON.parse(fixture);
+  definition.exampleTexts = JSON.parse(await readFile(new URL('../examples/advertisement-spam-texts.json', import.meta.url), 'utf8'));
   normalizeList(definition);
   assert.ok(definition.exampleTexts.length > 0);
   assert.deepEqual(Object.keys(definition.questions), ['allowed']);
   await mkdir(commonDir);
-  await writeFile(path.join(commonDir, `${id}.json`), fixture);
+  await writeFile(path.join(commonDir, `${id}.json`), JSON.stringify(definition));
   const url = await serve(t, { env: {}, commonDir, storageDir });
   const otherUrl = await serve(t, { env: {}, commonDir, storageDir: path.join(root, 'other-local') });
   const getLists = async base => (await (await fetch(`${base}/api/question-lists`)).json()).lists;

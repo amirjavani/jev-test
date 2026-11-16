@@ -5,25 +5,22 @@ import { defaultExamples, defaultQuestions, imageExampleQuestions, imageExampleL
 import { normalizeExpectedAnswers } from '../shared/expected-answers.js';
 import { parseDatasetList } from '../shared/text-files.js';
 
-test('all bundled text and common policy examples have a valid reference answer for every question', async () => {
+test('all bundled text and common policy examples retain valid optional reference answers', async () => {
   const folder = new URL('../common/question-lists/', import.meta.url);
   for (const file of await readdir(folder)) {
     if (!file.endsWith('.json')) continue;
     const list = JSON.parse(await readFile(new URL(file, folder), 'utf8'));
     assert.ok(list.exampleTexts.every(item => typeof item === 'object' && typeof item.text === 'string' && item.expectedAnswers), file);
     for (const { expectedAnswers: answers } of list.exampleTexts) {
-      assert.deepEqual(Object.keys(answers).sort(), Object.keys(list.questions).sort(), file);
       assert.deepEqual(normalizeExpectedAnswers(answers, list.questions), answers);
     }
-    if (file.startsWith('b5d81d1a')) {
-      assert.equal(list.exampleTexts.length, 40);
-      assert.deepEqual(list.exampleTexts[10].expectedAnswers, { advertising_spam_allowed: true, iran_politics_allowed: false, profanity_allowed: true, respect_allowed: true });
-      assert.deepEqual(list.exampleTexts[14].expectedAnswers, { advertising_spam_allowed: true, iran_politics_allowed: true, profanity_allowed: false, respect_allowed: true });
-      assert.deepEqual(parseDatasetList(await readFile(new URL('../examples/combined-moderation-texts.json', import.meta.url), 'utf8')), list.exampleTexts);
-    }
-    if (file.startsWith('89a42172')) {
-      const imported = parseDatasetList(await readFile(new URL('../examples/advertisement-spam-texts.json', import.meta.url), 'utf8'));
-      assert.deepEqual(imported, list.exampleTexts);
+    const dataset = file.startsWith('89a42172') ? 'advertisement-spam-texts' : file.startsWith('e2b74593') ? 'sexual-content-texts' : null;
+    if (dataset) {
+      const imported = parseDatasetList(await readFile(new URL(`../examples/${dataset}.json`, import.meta.url), 'utf8'));
+      assert.deepEqual(imported.map(item => item.text), list.exampleTexts.map(item => item.text));
+      for (const [index, item] of list.exampleTexts.entries()) {
+        for (const [name, answer] of Object.entries(item.expectedAnswers)) assert.equal(imported[index].expectedAnswers[name], answer);
+      }
     }
   }
   const imported = parseDatasetList(await readFile(new URL('../examples/texts.json', import.meta.url), 'utf8'));

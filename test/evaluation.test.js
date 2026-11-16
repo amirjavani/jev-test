@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareEntry, evaluateDataset, boxOverlap } from '../shared/evaluation.js';
+import { compareEntry, evaluateDataset, boxOverlap, classifyNoulProbability } from '../shared/evaluation.js';
 import { normalizeRun } from '../shared/runs.js';
 
 const questions = {
@@ -11,11 +11,11 @@ const questions = {
 };
 const success = (expectedAnswers, data) => ({ expectedAnswers, status: 'success', response: { ok: true, data } });
 
-test('compares boolean moderation and typed probabilities using the existing inclusive 0.5 threshold', () => {
+test('compares boolean moderation and typed probabilities using strict approve/reject thresholds and inclusive human-review boundaries', () => {
   for (const [actual, expected, status] of [[true, true, 'correct'], [false, false, 'correct'], [false, true, 'wrong']]) {
     assert.equal(compareEntry(success({ allowed: expected }, { allowed: actual }), questions).allowed.status, status);
   }
-  for (const [noul, expected, status] of [[0, false, 'correct'], [0.49999, false, 'correct'], [.5, true, 'correct'], [1, false, 'wrong']]) {
+  for (const [noul, expected, status] of [[0, false, 'correct'], [0.29999, false, 'correct'], [.3, false, 'review'], [.5, true, 'review'], [.9, true, 'review'], [.90001, true, 'correct'], [1, false, 'wrong']]) {
     const result = compareEntry(success({ allowed: expected }, { answers: { allowed: { type: 'noul', noul } } }), questions).allowed;
     assert.equal(result.status, status);
     assert.equal(result.probability, noul);
@@ -93,22 +93,22 @@ test('dataset and per-question accuracy use scored labels with explicit coverage
   assert.equal(evaluateDataset([success({}, { allowed: false })], q).summary.accuracy, null);
 });
 
-test('moderation keeps real probabilities and human review stays manual at every probability', () => {
+test('moderation preserves probabilities and applies automatic review independently of reference labels', () => {
   const q = { allowed: questions.allowed };
-  for (const probability of [0, .49, .5, 1]) {
+  for (const probability of [0, .29999, .3, .49, .5, .9, .90001, 1]) {
     const entry = success({ allowed: 'human' }, { allowed: probability >= .5 });
     entry.response.noulProbabilities = { allowed: probability };
     const result = compareEntry(entry, q).allowed;
     assert.equal(result.status, 'review');
     assert.equal(result.probability, probability);
-    assert.equal(result.predicted, probability >= .5);
+    assert.equal(result.predicted, classifyNoulProbability(probability));
     const report = evaluateDataset([entry], q);
     assert.equal(report.summary.review, 1);
     assert.equal(report.summary.scored, 0);
     assert.equal(report.summary.accuracy, null);
     assert.equal(report.inputs.review, 1);
     entry.expectedAnswers.allowed = true;
-    assert.equal(compareEntry(entry, q).allowed.status, probability >= .5 ? 'correct' : 'wrong');
+    assert.equal(compareEntry(entry, q).allowed.status, probability > .9 ? 'correct' : probability < .3 ? 'wrong' : 'review');
   }
   assert.equal(compareEntry(success({ allowed: false }, { allowed: false }), q).allowed.probability, undefined);
 });
@@ -134,4 +134,17 @@ test('saved/exported evaluation is recomputed from the run snapshot, ignoring su
   const reopened = JSON.parse(JSON.stringify(run));
   assert.deepEqual(evaluateDataset(reopened.entries, reopened.request.questions), run.evaluation);
   assert.ok(!Object.hasOwn(run.request, 'evaluation'));
+});
+
+test('decision policy uses raw probabilities for all Noul names and rejects invalid values', () => {
+  for (const [probability, decision] of [[0, false], [.299999, false], [.3, 'human'], [.9, 'human'], [.900001, true], [1, true]]) {
+    assert.equal(classifyNoulProbability(probability), decision);
+    const q = { arbitrary_question: { type: 'noul' } };
+    const entry = success({}, { answers: { arbitrary_question: { type: 'noul', noul: probability } } });
+    const comparison = compareEntry(entry, q).arbitrary_question;
+    assert.equal(comparison.predicted, decision);
+    assert.equal(comparison.status, 'unlabeled');
+    assert.equal(comparison.probability, probability);
+  }
+  for (const invalid of [undefined, null, '0.95', NaN, Infinity, -.01, 1.01]) assert.equal(classifyNoulProbability(invalid), null);
 });

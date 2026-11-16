@@ -1,26 +1,28 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Download, Save, Upload } from 'lucide-react';
 import { editorsFromQuestions, MAX_LIST_BYTES, normalizeList, questionsFromEditors } from '../shared/question-lists.js';
-import { examplesForList } from '../shared/question-examples.js';
 import { sameQuestions } from '../shared/runs.js';
 import QuestionListExamples from './QuestionListExamples.jsx';
+import { combineQuestionLists, examplesForSelectedLists } from '../shared/selected-question-lists.js';
 
 const bundledLists = Object.entries(import.meta.glob('../common/question-lists/*.json', { eager: true, import: 'default' }))
   .map(([path, list]) => ({ ...list, id: path.split('/').pop().replace(/\.json$/, '') }));
 
 export default function QuestionLibrary({ questions, onLoad, onSelectionChange, onLoadTexts, running }) {
   const [lists, setLists] = useState([]);
-  const [selected, setSelected] = useState('');
+  const [selected, setSelected] = useState([]);
   const [name, setName] = useState('My questions');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const fileInput = useRef(null);
-  const activeList = lists.find(list => list.id === selected);
+  const selectedLists = useMemo(() => selected.map(id => lists.find(list => list.id === id)).filter(Boolean), [lists, selected]);
+  const activeList = useMemo(() => combineQuestionLists(selectedLists), [selectedLists]);
+  const savedList = selectedLists.length === 1 ? selectedLists[0] : null;
   let examples = [];
   let exampleError = '';
-  try { examples = examplesForList(activeList, bundledLists); } catch (e) { exampleError = e.message; }
-  useEffect(() => { onSelectionChange(lists.find(list => list.id === selected) || null); }, [lists, selected, onSelectionChange]);
+  try { examples = examplesForSelectedLists(selectedLists, bundledLists); } catch (e) { exampleError = e.message; }
+  useEffect(() => { onSelectionChange(savedList); }, [savedList, onSelectionChange]);
   useEffect(() => {
     const controller = new AbortController();
     fetch('/api/question-lists', { signal: controller.signal })
@@ -31,16 +33,25 @@ export default function QuestionLibrary({ questions, onLoad, onSelectionChange, 
   }, []);
   function currentList() { return normalizeList({ version: 1, name, questions: questionsFromEditors(questions) }); }
   function load(list) { onLoad(editorsFromQuestions(list.questions).map(q => ({ ...q, key: crypto.randomUUID() }))); setName(list.name); setError(''); }
+  function selectLists(ids) {
+    setError(''); setMessage('');
+    try {
+      const next = combineQuestionLists(ids.map(id => lists.find(list => list.id === id)));
+      if (next) load(next); else setName('My questions');
+      setSelected(ids);
+      if (next) setMessage(`Loaded ${ids.length} list${ids.length === 1 ? '' : 's'} · ${Object.keys(next.questions).length} questions.`);
+    } catch (e) { setError(e.message); }
+  }
   async function save(asCopy = false) {
     setError(''); setMessage('');
     try {
       const list = currentList();
       setBusy(true);
-      const response = await fetch('/api/question-lists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...list, ...(examples.length && sameQuestions(activeList?.questions, list.questions) ? { exampleTexts: examples } : {}), ...(selected && asCopy !== true ? { id: selected } : {}) }) });
+      const response = await fetch('/api/question-lists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...list, ...(examples.length && sameQuestions(activeList?.questions, list.questions) ? { exampleTexts: examples } : {}), ...(savedList && asCopy !== true ? { id: savedList.id } : {}) }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not save question list.');
       setLists(all => [...all.filter(item => item.id !== data.id), data].sort((a, b) => a.name.localeCompare(b.name)));
-      setSelected(data.id); setMessage(data.scope === 'common' ? 'Shared changes saved. Available to everyone using this project.' : 'Saved in this project. Excluded from Git.');
+      setSelected([data.id]); setMessage(data.scope === 'common' ? 'Shared changes saved. Available to everyone using this project.' : 'Saved in this project. Excluded from Git.');
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   function exportFile() {
@@ -66,20 +77,16 @@ export default function QuestionLibrary({ questions, onLoad, onSelectionChange, 
       let value;
       try { value = JSON.parse(await file.text()); } catch { throw new Error('This file is not valid JSON. Your questions have not changed.'); }
       const list = normalizeList(value);
-      load(list); setSelected(''); setMessage('Imported questions. Save locally to keep them in this project.');
+      load(list); setSelected([]); setMessage('Imported questions. Save locally to keep them in this project.');
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   return <div className="question-library">
-    <div className="library-fields"><label htmlFor="saved-question-list">Question lists<select id="saved-question-list" value={selected} disabled={busy} onChange={e => {
-      setSelected(e.target.value); setMessage(''); setError('');
-      const list = lists.find(item => item.id === e.target.value);
-      if (list) { load(list); setMessage(`Loaded ${list.name}.`); } else setName('My questions');
-    }}><option value="">New local list</option>{[['common', 'Common · public & editable'], ['local', 'Local · ignored by Git']].map(([scope, label]) => <optgroup key={scope} label={label}>{lists.filter(list => (list.scope || 'local') === scope).map(list => <option key={list.id} value={list.id}>{list.name} ({Object.keys(list.questions).length})</option>)}</optgroup>)}</select></label>
+    <div className="library-fields"><fieldset className="saved-question-lists" disabled={busy || running} aria-describedby="question-lists-hint"><legend>Question lists · {selected.length} selected</legend><div className="saved-question-list-options">{[['common', 'Common · public & editable'], ['local', 'Local · ignored by Git']].map(([scope, label]) => <div key={scope}><p className="question-list-scope">{label}</p>{lists.filter(list => (list.scope || 'local') === scope).map(list => <label className="question-list-option" key={list.id}><input type="checkbox" checked={selected.includes(list.id)} onChange={e => selectLists(e.target.checked ? [...selected, list.id] : selected.filter(id => id !== list.id))} /><span>{list.name} ({Object.keys(list.questions).length})</span></label>)}</div>)}</div><button type="button" className="new-question-list" disabled={!selected.length} onClick={() => selectLists([])}>New local list / clear selection</button></fieldset>
     <label htmlFor="question-list-name">List name<input id="question-list-name" value={name} maxLength={100} disabled={busy} onChange={e => { setName(e.target.value); setMessage(''); }} /></label></div>
-    <div className="library-actions"><button disabled={busy} onClick={() => save()}><Save size={13} />{busy ? 'Working…' : activeList?.scope === 'common' ? 'Save shared changes' : selected ? 'Save changes' : 'Save locally'}</button>{activeList?.scope === 'common' && <button disabled={busy} onClick={() => save(true)}>Save local copy</button>}<button disabled={busy} onClick={() => fileInput.current.click()}><Upload size={13} />Import JSON</button><button disabled={busy} onClick={exportFile}><Download size={13} />Export JSON</button><input ref={fileInput} aria-label="Import question list file" type="file" accept=".json,application/json" hidden onChange={importFile} /></div>
+    <div className="library-actions"><button disabled={busy} onClick={() => save()}><Save size={13} />{busy ? 'Working…' : activeList?.scope === 'common' ? 'Save shared changes' : savedList ? 'Save changes' : selected.length > 1 ? 'Save combined list locally' : 'Save locally'}</button>{activeList?.scope === 'common' && <button disabled={busy} onClick={() => save(true)}>Save local copy</button>}<button disabled={busy} onClick={() => fileInput.current.click()}><Upload size={13} />Import JSON</button><button disabled={busy} onClick={exportFile}><Download size={13} />Export JSON</button><input ref={fileInput} aria-label="Import question list file" type="file" accept=".json,application/json" hidden onChange={importFile} /></div>
     {activeList?.scope === 'common' && <div className="common-list-note"><strong>Public & editable</strong><p>Shared with everyone using this project. Save shared changes to update the common list, or save a local copy for your own variant.</p></div>}
     <QuestionListExamples list={activeList} examples={examples} error={exampleError} disabled={running || busy} onLoad={() => { setError(''); try { onLoadTexts(examples, activeList.questions); setMessage(`Loaded ${examples.length} labeled examples. Each array item includes its expected answers.`); } catch (e) { setError(e.message); } }} />
-    <p className="field-hint">Choose a saved list to load it. Lists contain questions only; state stays as entered.</p>
+    <p className="field-hint" id="question-lists-hint">Select one or more lists to load their questions together. Identical questions are included once. Different questions sharing a name include their list name to keep answers separate. Clearing the selection keeps your current questions for a new local list.</p>
     {message && <p className="library-message" role="status">{message}</p>}{error && <p className="library-error" role="alert">{error}</p>}
   </div>;
 }

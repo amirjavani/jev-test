@@ -37,6 +37,7 @@ export default function RunOutput({ run, setRun, built, running, onRun, onCancel
     return () => abort.abort();
   }, [savedList?.id, revision]);
   const entries = run?.entries || [];
+  const onlyNoulQuestions = run && Object.values(run.request.questions).every(question => question.type === 'noul');
   const usageSummary = summarizeUsage(entries);
   const evaluation = useMemo(() => run ? evaluateDataset(run.entries, run.request.questions) : null, [run]);
   const complete = entries.filter(entry => ['success', 'error', 'cancelled', 'skipped'].includes(entry.status)).length;
@@ -98,7 +99,7 @@ export default function RunOutput({ run, setRun, built, running, onRun, onCancel
         {entry.status === 'skipped' && <p className="field-hint">Skipped after cancellation.</p>}
         <AnswerComparisons evaluation={evaluation.entries.find(item => item.index === entry.index)} index={entry.index} />
         {(entry.error || entry.response?.error) && <div className="error-message">{entry.error || entry.response.error}</div>}
-        {entry.response && <><div className="result-meta"><span>HTTP {entry.response.status}</span><span>{entry.response.durationMs ?? '—'} ms</span></div>{entry.response.ok && entry.response.data?.answers ? Object.entries(entry.response.data.answers).map(([name, answer]) => <AnswerComponent key={name} name={name} answer={answer} />) : entry.response.data && <pre>{pretty(entry.response.data)}</pre>}</>}
+        {entry.response && <><div className="result-meta"><span>HTTP {entry.response.status}</span><span>{entry.response.durationMs ?? '—'} ms</span></div>{entry.response.ok && onlyNoulQuestions ? null : entry.response.ok && entry.response.data?.answers ? Object.entries(entry.response.data.answers).filter(([, answer]) => answer?.type !== 'noul').map(([name, answer]) => <AnswerComponent key={name} name={name} answer={answer} />) : entry.response.data && <pre>{pretty(entry.response.data)}</pre>}</>}
         {['success', 'error', 'cancelled'].includes(entry.status) && <TokenUsage usage={responseUsage(entry.response)} />}
       </div></details>) : <div className="empty-output"><div className="empty-illustration"><Layers3 size={30} /></div><h3>Your next decision starts here</h3><p>Test text, images, or a list of texts. Each response appears separately as it finishes.</p></div>}
     </div>

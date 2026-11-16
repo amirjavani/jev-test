@@ -2,7 +2,15 @@ import { normalizeExpectedAnswers } from './expected-answers.js';
 
 const own = (value, key) => value !== null && typeof value === 'object' && Object.hasOwn(value, key);
 const finite = value => typeof value === 'number' && Number.isFinite(value);
-export const comparisonRules = Object.freeze({ noulThreshold: 0.5, humanReview: 'manual; human labels excluded until resolved to yes or no', score: 'nearest level for integer labels; exact for fractional labels', boxIouThreshold: 0.5 });
+export const comparisonRules = Object.freeze({ noulApproveAbove: 0.9, noulRejectBelow: 0.3, humanReview: 'probability from 0.3 through 0.9 inclusive, or a manual human label; excluded from automatic accuracy', score: 'nearest level for integer labels; exact for fractional labels', boxIouThreshold: 0.5 });
+
+// Compare the original probability, before rounding it for display.
+export function classifyNoulProbability(probability) {
+  if (!finite(probability) || probability < 0 || probability > 1) return null;
+  if (probability > comparisonRules.noulApproveAbove) return true;
+  if (probability < comparisonRules.noulRejectBelow) return false;
+  return 'human';
+}
 
 export function normalizeNoulProbabilities(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
@@ -33,7 +41,7 @@ function prediction(entry, name, question) {
     const probability = reported ? entry.response.noulProbabilities[name] : answer?.noul;
     if (!reported && probability === undefined && typeof answer === 'boolean') return { predicted: answer };
     return finite(probability) && probability >= 0 && probability <= 1
-      ? { predicted: probability >= comparisonRules.noulThreshold, probability } : { predicted: null };
+      ? { predicted: classifyNoulProbability(probability), probability } : { predicted: null };
   }
   if (question.type === 'choice') {
     const choice = answer?.choice ?? answer;
@@ -60,6 +68,7 @@ export function compareEntry(entry, questions) {
     if (['pending', 'running'].includes(entry.status)) return [name, { ...base, status: 'pending', reason: 'Waiting for model answer' }];
     if (entry.status !== 'success' || entry.response?.ok !== true) return [name, { ...base, status: 'unavailable', reason: entry.status === 'skipped' ? 'Input skipped' : 'No successful model response' }];
     if (actual.predicted === null) return [name, { ...base, status: 'unavailable', reason: 'Model answer missing or invalid' }];
+    if (question.type === 'noul' && actual.predicted === 'human') return [name, { ...base, status: 'review', reason: 'Yes/allowed probability is between 30% and 90%, inclusive; human approval is required.' }];
     if (question.type === 'noul' && expected === 'human') return [name, { ...base, status: 'review', reason: 'Decide manually; resolve the expected answer to Yes or No to score.' }];
     let correct;
     if (question.type === 'box') {

@@ -84,6 +84,7 @@ export default function App() {
       const data = await response.json();
       if (!Array.isArray(data.providers)) throw new Error();
       setProviders(data.providers);
+      if (data.capabilities?.noulProbabilities !== true) setConfigError('The API server is outdated. Restart the local server to enable percentage results.');
     } catch (e) { if (e.name !== 'AbortError') setConfigError('Could not check the API key. Make sure the local server is running.'); }
     finally { if (!signal?.aborted) setConfigLoading(false); }
   }

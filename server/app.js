@@ -2,6 +2,7 @@ import express from 'express';
 import { validateRequest } from '../shared/validation.js';
 import { registerQuestionLists } from './question-lists.js';
 import { normalizeUsage } from '../shared/usage.js';
+import { classifyNoulProbability } from '../shared/evaluation.js';
 
 export function createApp({ env = process.env, fetchImpl = fetch, storageDir, commonDir } = {}) {
   const app = express();
@@ -11,7 +12,7 @@ export function createApp({ env = process.env, fetchImpl = fetch, storageDir, co
   };
   app.use(express.json({ limit: '32mb' }));
   registerQuestionLists(app, storageDir, commonDir);
-  app.get('/api/config', (_req, res) => res.json({ providers: Object.entries(providers).map(([id, p]) => ({ id, name: p.name, endpoint: p.url, model: p.model, configured: Boolean(p.key?.trim()) })) }));
+  app.get('/api/config', (_req, res) => res.set('Cache-Control', 'no-store').json({ capabilities: { noulProbabilities: true }, providers: Object.entries(providers).map(([id, p]) => ({ id, name: p.name, endpoint: p.url, model: p.model, configured: Boolean(p.key?.trim()) })) }));
   app.post('/api/evaluate', async (req, res) => {
     const { provider, request, longContext = false } = req.body ?? {};
     if (!Object.hasOwn(providers, provider ?? '')) return res.status(400).json({ error: 'Select a supported provider.' });
@@ -30,20 +31,26 @@ export function createApp({ env = process.env, fetchImpl = fetch, storageDir, co
       // Redact the credential even if an upstream error unexpectedly echoes it.
       let safeData = JSON.parse(JSON.stringify(data).split(config.key.trim()).join('[REDACTED]'));
       const usage = normalizeUsage(safeData?.usage);
-      // Moderation questions return independent booleans rather than diagnostic fields.
       const decisions = Object.entries(request.questions);
       let noulProbabilities;
-      if (response.ok && decisions.every(([name, question]) => (name === 'allowed' || name.endsWith('_allowed')) && question.type === 'noul')) {
-        const results = [];
-        for (const [name] of decisions) {
-          const probability = safeData?.answers?.[name]?.noul;
-          if (typeof probability !== 'number' || !Number.isFinite(probability) || probability < 0 || probability > 1) {
-            return res.status(502).json({ error: `The provider did not return a valid allowed probability for ${name}. Try again.`, ...(usage ? { usage } : {}) });
+      if (response.ok) {
+        // Keep original probabilities for every Noul question, including mixed requests.
+        const probabilities = [];
+        for (const [name, question] of decisions) {
+          if (question.type !== 'noul') continue;
+          const answer = safeData?.answers?.[name];
+          const probability = answer?.noul;
+          if ((answer?.type !== undefined && answer.type !== 'noul') || typeof probability !== 'number' || !Number.isFinite(probability) || probability < 0 || probability > 1) {
+            const label = name === 'allowed' || name.endsWith('_allowed') ? 'allowed probability' : 'probability';
+            return res.status(502).json({ ok: false, error: `The provider did not return a valid ${label} for ${name}. No percentage can be shown. Try again.`, ...(usage ? { usage } : {}) });
           }
-          results.push([name, probability >= 0.5]);
+          probabilities.push([name, probability]);
         }
-        noulProbabilities = Object.fromEntries(decisions.map(([name]) => [name, safeData.answers[name].noul]));
-        safeData = Object.fromEntries(results);
+        if (probabilities.length) noulProbabilities = Object.fromEntries(probabilities);
+        // Moderation keeps its decision format; the unrounded values travel alongside it.
+        if (decisions.every(([name, question]) => (name === 'allowed' || name.endsWith('_allowed')) && question.type === 'noul')) {
+          safeData = Object.fromEntries(probabilities.map(([name, probability]) => [name, classifyNoulProbability(probability)]));
+        }
       }
       res.status(response.ok ? 200 : response.status).json({ ok: response.ok, status: response.status, durationMs: Math.round(performance.now() - start), data: safeData, ...(noulProbabilities ? { noulProbabilities } : {}), ...(usage ? { usage } : {}) });
     } catch (e) {
